@@ -7,7 +7,11 @@ import json
 
 import pytest
 
+
 BASE_URL = os.environ.get("BASE_URL")
+
+if not BASE_URL:
+    raise RuntimeError("BASE_URL environment variable is required")
 #BASE_URL = "https://m0qwfec693.execute-api.us-east-1.amazonaws.com/Prod"
 DEFAULT_TIMEOUT = 2  # in secs
 
