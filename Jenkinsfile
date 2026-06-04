@@ -15,6 +15,13 @@ pipeline {
         STAGE_NAME = 'staging'
 
         TEST_FILE = 'test/integration/todoApiTest.py'
+
+        STATIC_PYTHON = '/home/ubuntu/.venv/bin/python'
+        FLAKE8_BIN = '/home/ubuntu/.venv/bin/flake8'
+        BANDIT_BIN = '/home/ubuntu/.venv/bin/bandit'
+
+        TEST_PYTHON = '/home/ubuntu/.venv/bin/python'
+        PYTEST_BIN = '/home/ubuntu/.venv/bin/pytest'
     }
 
     stages {
@@ -43,7 +50,15 @@ pipeline {
                     echo "Repository state:"
                     git status
                     git log -1 --oneline
+
+                    echo "Repository files:"
                     ls -la
+
+                    echo "Test files:"
+                    find test -maxdepth 4 -type f | sort || true
+
+                    echo "Source files:"
+                    find src -maxdepth 4 -type f | sort || true
                 '''
 
                 stash name: 'source-code', includes: '**/*'
@@ -59,21 +74,20 @@ pipeline {
                 unstash 'source-code'
 
                 sh '''
-                    export PATH="$HOME/.local/bin:$PATH"
-
                     whoami
                     hostname
                     pwd
 
-                    echo "Checking installed tools"
-                    flake8 --version
-                    bandit --version
+                    echo "--- Static agent tools ---"
+                    ${STATIC_PYTHON} --version
+                    ${FLAKE8_BIN} --version
+                    ${BANDIT_BIN} --version
 
                     mkdir -p reports
 
                     echo "Running Flake8 only on src/"
                     set +e
-                    flake8 src --output-file=reports/flake8.log
+                    ${FLAKE8_BIN} src --output-file=reports/flake8.log
                     FLAKE8_EXIT=$?
                     set -e
 
@@ -87,7 +101,7 @@ pipeline {
 
                     echo "Running Bandit only on src/"
                     set +e
-                    bandit -r src -f json -o reports/bandit.json
+                    ${BANDIT_BIN} -r src -f json -o reports/bandit.json
                     BANDIT_EXIT=$?
                     set -e
 
@@ -99,6 +113,7 @@ pipeline {
                     echo "Bandit exit code: $BANDIT_EXIT"
                     echo "Bandit findings do not fail this stage because no quality gate is required."
 
+                    echo "--- Reports generated ---"
                     ls -la reports
                 '''
 
@@ -119,20 +134,24 @@ pipeline {
                     hostname
                     pwd
 
-                    echo "Checking AWS identity"
-                    aws sts get-caller-identity
-
-                    echo "Checking SAM version"
+                    echo "--- Controller tools ---"
+                    git --version
+                    aws --version
                     sam --version
 
-                    echo "Validating SAM template"
+                    echo "--- AWS identity ---"
+                    aws sts get-caller-identity
+
+                    echo "--- SAM validate ---"
                     sam validate --template-file template.yaml
 
-                    echo "Building SAM application"
+                    echo "--- SAM build ---"
                     sam build --template-file template.yaml
 
-                    echo "Deploying SAM application to staging"
+                    echo "--- SAM deploy to staging ---"
 
+                    # Avoid using possibly invalid samconfig.toml buckets.
+                    # The deployment will be fully parameterized from Jenkins.
                     if [ -f samconfig.toml ]; then
                         mv samconfig.toml samconfig.toml.bak
                     fi
@@ -147,7 +166,7 @@ pipeline {
                         --no-fail-on-empty-changeset \
                         --parameter-overrides Stage="$STAGE_NAME"
 
-                    echo "Obtaining API Gateway base URL from CloudFormation outputs"
+                    echo "--- Getting API Gateway URL from CloudFormation outputs ---"
 
                     API_URL=$(aws cloudformation describe-stacks \
                         --stack-name "$STACK_NAME" \
@@ -157,6 +176,12 @@ pipeline {
 
                     if [ -z "$API_URL" ] || [ "$API_URL" = "None" ]; then
                         echo "ERROR: Could not obtain BaseUrlApi from CloudFormation outputs"
+                        echo "Available outputs:"
+                        aws cloudformation describe-stacks \
+                            --stack-name "$STACK_NAME" \
+                            --region "$AWS_DEFAULT_REGION" \
+                            --query "Stacks[0].Outputs" \
+                            --output table
                         exit 1
                     fi
 
@@ -180,14 +205,14 @@ pipeline {
                 unstash 'api-url'
 
                 sh '''
-                    export PATH="$HOME/.local/bin:$PATH"
-
                     whoami
                     hostname
                     pwd
 
-                    echo "Checking pytest"
-                    pytest --version
+                    echo "--- Test agent tools ---"
+                    ${TEST_PYTHON} --version
+                    ${PYTEST_BIN} --version
+                    curl --version
 
                     mkdir -p reports
 
@@ -196,7 +221,10 @@ pipeline {
                     echo "Running tests against:"
                     echo "$BASE_URL"
 
-                    pytest "$TEST_FILE" --junitxml=reports/pytest-results.xml
+                    echo "Checking test file exists:"
+                    ls -la "$TEST_FILE"
+
+                    ${PYTEST_BIN} "$TEST_FILE" --junitxml=reports/pytest-results.xml
                 '''
 
                 junit allowEmptyResults: false, testResults: 'reports/pytest-results.xml'
@@ -227,13 +255,15 @@ pipeline {
 
                         git remote set-url origin https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git
 
+                        echo "--- Fetching branches ---"
                         git fetch origin development
                         git fetch origin master
 
+                        echo "--- Checkout master ---"
                         git checkout master
                         git reset --hard origin/master
 
-                        echo "Preserving current master Jenkinsfile if it exists"
+                        echo "--- Preserve current master Jenkinsfile if it exists ---"
                         if git cat-file -e HEAD:Jenkinsfile 2>/dev/null; then
                             git show HEAD:Jenkinsfile > /tmp/master-Jenkinsfile
                             MASTER_JENKINSFILE_EXISTS="yes"
@@ -241,11 +271,11 @@ pipeline {
                             MASTER_JENKINSFILE_EXISTS="no"
                         fi
 
-                        echo "Merging development into master"
+                        echo "--- Merge development into master ---"
                         git merge --no-ff origin/development -m "Promote development to master from Jenkins CI"
 
                         if [ "$MASTER_JENKINSFILE_EXISTS" = "yes" ]; then
-                            echo "Restoring master Jenkinsfile to avoid overwriting CD pipeline"
+                            echo "--- Restore master Jenkinsfile to avoid overwriting future CD pipeline ---"
                             cp /tmp/master-Jenkinsfile Jenkinsfile
                             git add Jenkinsfile
 
@@ -256,6 +286,7 @@ pipeline {
                             fi
                         fi
 
+                        echo "--- Push master ---"
                         git push origin master
                     '''
                 }
