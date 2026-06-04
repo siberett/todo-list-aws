@@ -40,13 +40,9 @@ pipeline {
                 ])
 
                 sh '''
-                    echo "Current branch:"
-                    git branch --show-current || true
-
-                    echo "Last commit:"
+                    echo "Current repository state"
+                    git status
                     git log -1 --oneline
-
-                    echo "Repository files:"
                     ls -la
                 '''
 
@@ -63,21 +59,21 @@ pipeline {
                 unstash 'source-code'
 
                 sh '''
+                    export PATH="$HOME/.local/bin:$PATH"
+
                     whoami
                     hostname
                     pwd
 
+                    echo "Checking tools"
+                    flake8 --version
+                    bandit --version
+
                     mkdir -p reports
-
-                    python3 -m venv .venv
-                    . .venv/bin/activate
-
-                    pip install --upgrade pip
-                    pip install flake8 flake8-junit-report bandit
 
                     echo "Running Flake8 only on src/"
                     set +e
-                    flake8 src --format=default --output-file=reports/flake8.log
+                    flake8 src --output-file=reports/flake8.log
                     FLAKE8_EXIT=$?
                     set -e
 
@@ -86,8 +82,8 @@ pipeline {
                         exit 1
                     fi
 
-                    echo "Flake8 finished with exit code: $FLAKE8_EXIT"
-                    echo "Flake8 findings do not fail this stage if report exists."
+                    echo "Flake8 exit code: $FLAKE8_EXIT"
+                    echo "Flake8 findings do not fail this stage because no quality gate is required."
 
                     echo "Running Bandit only on src/"
                     set +e
@@ -100,8 +96,8 @@ pipeline {
                         exit 1
                     fi
 
-                    echo "Bandit finished with exit code: $BANDIT_EXIT"
-                    echo "Bandit findings do not fail this stage if report exists."
+                    echo "Bandit exit code: $BANDIT_EXIT"
+                    echo "Bandit findings do not fail this stage because no quality gate is required."
 
                     ls -la reports
                 '''
@@ -151,7 +147,6 @@ pipeline {
 
                     echo "Deploying SAM application to staging"
 
-                    # Avoid using samconfig.toml buckets if they do not exist or are not accessible.
                     if [ -f samconfig.toml ]; then
                         mv samconfig.toml samconfig.toml.bak
                     fi
@@ -199,9 +194,14 @@ pipeline {
                 unstash 'api-url'
 
                 sh '''
+                    export PATH="$HOME/.local/bin:$PATH"
+
                     whoami
                     hostname
                     pwd
+
+                    echo "Checking pytest"
+                    pytest --version
 
                     mkdir -p reports
 
@@ -209,16 +209,6 @@ pipeline {
 
                     echo "Running tests against:"
                     echo "$BASE_URL"
-
-                    python3 -m venv .venv
-                    . .venv/bin/activate
-
-                    pip install --upgrade pip
-                    pip install pytest requests
-
-                    if [ -f src/requirements.txt ]; then
-                        pip install -r src/requirements.txt
-                    fi
 
                     pytest "$TEST_FILE" --junitxml=reports/pytest-results.xml
                 '''
