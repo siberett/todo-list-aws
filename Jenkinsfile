@@ -12,7 +12,7 @@ pipeline {
 
         AWS_DEFAULT_REGION = 'us-east-1'
         STACK_NAME = 'todo-list-aws-staging'
-        STAGE_NAME = 'staging'
+        SAM_STAGE = 'staging'
 
         TEST_FILE = 'test/integration/todoApiTest.py'
 
@@ -149,9 +149,10 @@ pipeline {
                     sam build --template-file template.yaml
 
                     echo "--- SAM deploy to staging ---"
+                    echo "STACK_NAME=$STACK_NAME"
+                    echo "AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION"
+                    echo "SAM_STAGE=$SAM_STAGE"
 
-                    # Avoid using possibly invalid samconfig.toml buckets.
-                    # The deployment will be fully parameterized from Jenkins.
                     if [ -f samconfig.toml ]; then
                         mv samconfig.toml samconfig.toml.bak
                     fi
@@ -164,7 +165,7 @@ pipeline {
                         --resolve-s3 \
                         --no-confirm-changeset \
                         --no-fail-on-empty-changeset \
-                        --parameter-overrides Stage="$STAGE_NAME"
+                        --parameter-overrides Stage="$SAM_STAGE"
 
                     echo "--- Getting API Gateway URL from CloudFormation outputs ---"
 
