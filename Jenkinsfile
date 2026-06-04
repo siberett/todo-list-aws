@@ -40,7 +40,7 @@ pipeline {
                 ])
 
                 sh '''
-                    echo "Current repository state"
+                    echo "Repository state:"
                     git status
                     git log -1 --oneline
                     ls -la
@@ -65,7 +65,7 @@ pipeline {
                     hostname
                     pwd
 
-                    echo "Checking tools"
+                    echo "Checking installed tools"
                     flake8 --version
                     bandit --version
 
@@ -101,22 +101,8 @@ pipeline {
 
                     ls -la reports
                 '''
-            }
 
-            post {
-                always {
-                    recordIssues(
-                        enabledForFailure: true,
-                        aggregatingResults: false,
-                        tools: [
-                            flake8(pattern: 'reports/flake8.log'),
-                            bandit(pattern: 'reports/bandit.json')
-                        ],
-                        qualityGates: []
-                    )
-
-                    archiveArtifacts artifacts: 'reports/*', fingerprint: true
-                }
+                archiveArtifacts artifacts: 'reports/*', fingerprint: true
             }
         }
 
@@ -212,13 +198,9 @@ pipeline {
 
                     pytest "$TEST_FILE" --junitxml=reports/pytest-results.xml
                 '''
-            }
 
-            post {
-                always {
-                    junit allowEmptyResults: false, testResults: 'reports/pytest-results.xml'
-                    archiveArtifacts artifacts: 'reports/*', fingerprint: true
-                }
+                junit allowEmptyResults: false, testResults: 'reports/pytest-results.xml'
+                archiveArtifacts artifacts: 'reports/*', fingerprint: true
             }
         }
 
@@ -291,7 +273,9 @@ pipeline {
         }
 
         always {
-            cleanWs()
+            node('controller') {
+                cleanWs()
+            }
         }
     }
 }
