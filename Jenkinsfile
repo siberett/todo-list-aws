@@ -1,161 +1,161 @@
-pipeline {
-    agent none
+ pipeline {
+    agent any
 
     options {
         timestamps()
         skipDefaultCheckout(true)
+        disableConcurrentBuilds()
     }
 
     environment {
-        REPO_URL = 'https://github.com/siberett/todo-list-aws.git'
+        REPOSITORY_URL = 'https://github.com/siberett/todo-list-aws.git'
         GIT_CREDENTIALS_ID = 'github-pat'
 
         AWS_DEFAULT_REGION = 'us-east-1'
         STACK_NAME = 'todo-list-aws-staging'
-        SAM_STAGE = 'staging'
+        SAM_ENVIRONMENT = 'staging'
 
         TEST_FILE = 'test/integration/todoApiTest.py'
-
-        STATIC_PYTHON = '/home/ubuntu/.venv/bin/python'
-        FLAKE8_BIN = '/home/ubuntu/.venv/bin/flake8'
-        BANDIT_BIN = '/home/ubuntu/.venv/bin/bandit'
-
-        TEST_PYTHON = '/home/ubuntu/.venv/bin/python'
-        PYTEST_BIN = '/home/ubuntu/.venv/bin/pytest'
     }
 
     stages {
-        stage('Get Code') {
-            agent { label 'controller' }
 
+        stage('Get Code') {
             steps {
-                echo '=== GET CODE ==='
+                cleanWs()
 
                 sh '''
+                    set -e
+
+                    echo "=== GET CODE ==="
                     whoami
                     hostname
                     pwd
+                    git --version
                 '''
 
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: '*/development']],
                     userRemoteConfigs: [[
-                        url: "${REPO_URL}",
+                        url: "${REPOSITORY_URL}",
                         credentialsId: "${GIT_CREDENTIALS_ID}"
                     ]]
                 ])
 
                 sh '''
-                    echo "Repository state:"
-                    git status
+                    set -e
+
+                    echo "--- Revision descargada ---"
                     git log -1 --oneline
+                    git status
 
-                    echo "Repository files:"
-                    ls -la
+                    echo "--- Código fuente ---"
+                    find src -maxdepth 3 -type f | sort
 
-                    echo "Test files:"
-                    find test -maxdepth 4 -type f | sort || true
-
-                    echo "Source files:"
-                    find src -maxdepth 4 -type f | sort || true
+                    echo "--- Pruebas de integración ---"
+                    find test/integration -maxdepth 2 -type f | sort
                 '''
-
-                stash name: 'source-code', includes: '**/*'
             }
         }
 
         stage('Static Test') {
-            agent { label 'static-agent' }
-
             steps {
-                echo '=== STATIC TEST: FLAKE8 + BANDIT ==='
-
-                unstash 'source-code'
-
                 sh '''
+                    set -e
+
+                    echo "=== STATIC TEST ==="
                     whoami
                     hostname
                     pwd
 
-                    echo "--- Static agent tools ---"
-                    ${STATIC_PYTHON} --version
-                    ${FLAKE8_BIN} --version
-                    ${BANDIT_BIN} --version
+                    echo "--- Versiones ---"
+                    flake8 --version
+                    bandit --version
 
                     mkdir -p reports
 
-                    echo "Running Flake8 only on src/"
-                    set +e
-                    ${FLAKE8_BIN} src --output-file=reports/flake8.log
-                    FLAKE8_EXIT=$?
-                    set -e
+                    echo "--- Flake8 sobre src/ ---"
 
-                    if [ ! -f reports/flake8.log ]; then
-                        echo "ERROR: Flake8 report was not generated"
-                        exit 1
-                    fi
+                    flake8 \
+                        --exit-zero \
+                        --format=pylint \
+                        src > reports/flake8.out
 
-                    echo "Flake8 exit code: $FLAKE8_EXIT"
-                    echo "Flake8 findings do not fail this stage because no quality gate is required."
+                    test -f reports/flake8.out
 
-                    echo "Running Bandit only on src/"
-                    set +e
-                    ${BANDIT_BIN} -r src -f json -o reports/bandit.json
-                    BANDIT_EXIT=$?
-                    set -e
+                    echo "--- Bandit sobre src/ ---"
 
-                    if [ ! -f reports/bandit.json ]; then
-                        echo "ERROR: Bandit report was not generated"
-                        exit 1
-                    fi
+                    bandit \
+                        --exit-zero \
+                        -r src \
+                        -f custom \
+                        -o reports/bandit.out \
+                        --msg-template "{abspath}:{line}: [{test_id}] {msg}"
 
-                    echo "Bandit exit code: $BANDIT_EXIT"
-                    echo "Bandit findings do not fail this stage because no quality gate is required."
+                    test -f reports/bandit.out
 
-                    echo "--- Reports generated ---"
+                    echo "--- Informes generados ---"
                     ls -la reports
                 '''
 
-                archiveArtifacts artifacts: 'reports/*', fingerprint: true
+                recordIssues(
+                    enabledForFailure: true,
+                    tools: [
+                        flake8(
+                            name: 'Flake8',
+                            pattern: 'reports/flake8.out'
+                        ),
+                        pyLint(
+                            name: 'Bandit',
+                            pattern: 'reports/bandit.out'
+                        )
+                    ]
+                )
             }
         }
 
         stage('Deploy') {
-            agent { label 'controller' }
-
             steps {
-                echo '=== DEPLOY TO STAGING WITH AWS SAM ==='
-
-                unstash 'source-code'
-
                 sh '''
+                    set -e
+
+                    echo "=== DEPLOY STAGING ==="
                     whoami
                     hostname
                     pwd
 
-                    echo "--- Controller tools ---"
-                    git --version
+                    echo "--- Versiones ---"
                     aws --version
                     sam --version
 
-                    echo "--- AWS identity ---"
+                    echo "--- Identidad AWS ---"
                     aws sts get-caller-identity
 
-                    echo "--- SAM validate ---"
+                    echo "--- Validación SAM ---"
                     sam validate --template-file template.yaml
 
-                    echo "--- SAM build ---"
+                    echo "--- Construcción SAM ---"
                     sam build --template-file template.yaml
 
-                    echo "--- SAM deploy to staging ---"
-                    echo "STACK_NAME=$STACK_NAME"
-                    echo "AWS_DEFAULT_REGION=$AWS_DEFAULT_REGION"
-                    echo "SAM_STAGE=$SAM_STAGE"
+                    echo "--- Despliegue no interactivo en Staging ---"
+                    echo "Stack: $STACK_NAME"
+                    echo "Region: $AWS_DEFAULT_REGION"
+                    echo "Stage: $SAM_ENVIRONMENT"
 
+                    # Se desactiva temporalmente samconfig.toml para evitar
+                    # utilizar buckets antiguos o inexistentes.
                     if [ -f samconfig.toml ]; then
-                        mv samconfig.toml samconfig.toml.bak
+                        mv samconfig.toml samconfig.toml.disabled
                     fi
+
+                    restore_samconfig() {
+                        if [ -f samconfig.toml.disabled ]; then
+                            mv samconfig.toml.disabled samconfig.toml
+                        fi
+                    }
+
+                    trap restore_samconfig EXIT
 
                     sam deploy \
                         --template-file .aws-sam/build/template.yaml \
@@ -165,9 +165,12 @@ pipeline {
                         --resolve-s3 \
                         --no-confirm-changeset \
                         --no-fail-on-empty-changeset \
-                        --parameter-overrides Stage="$SAM_STAGE"
+                        --parameter-overrides Stage="$SAM_ENVIRONMENT"
 
-                    echo "--- Getting API Gateway URL from CloudFormation outputs ---"
+                    restore_samconfig
+                    trap - EXIT
+
+                    echo "--- Obtención de la URL de API Gateway ---"
 
                     API_URL=$(aws cloudformation describe-stacks \
                         --stack-name "$STACK_NAME" \
@@ -176,119 +179,95 @@ pipeline {
                         --output text)
 
                     if [ -z "$API_URL" ] || [ "$API_URL" = "None" ]; then
-                        echo "ERROR: Could not obtain BaseUrlApi from CloudFormation outputs"
-                        echo "Available outputs:"
-                        aws cloudformation describe-stacks \
-                            --stack-name "$STACK_NAME" \
-                            --region "$AWS_DEFAULT_REGION" \
-                            --query "Stacks[0].Outputs" \
-                            --output table
+                        echo "ERROR: No se encontró el output BaseUrlApi."
                         exit 1
                     fi
 
-                    echo "API URL obtained:"
-                    echo "$API_URL"
-
-                    echo "$API_URL" > api_url.txt
+                    echo "API URL: $API_URL"
+                    printf '%s' "$API_URL" > api_url.txt
                 '''
-
-                stash name: 'api-url', includes: 'api_url.txt'
             }
         }
 
         stage('Rest Test') {
-            agent { label 'test-agent' }
-
             steps {
-                echo '=== REST TEST WITH PYTEST ==='
-
-                unstash 'source-code'
-                unstash 'api-url'
-
                 sh '''
+                    set -e
+
+                    echo "=== REST TEST ==="
                     whoami
                     hostname
                     pwd
 
-                    echo "--- Test agent tools ---"
-                    ${TEST_PYTHON} --version
-                    ${PYTEST_BIN} --version
+                    echo "--- Versiones ---"
+                    pytest --version
                     curl --version
 
                     mkdir -p reports
 
                     export BASE_URL="$(cat api_url.txt)"
 
-                    echo "Running tests against:"
-                    echo "$BASE_URL"
+                    if [ -z "$BASE_URL" ]; then
+                        echo "ERROR: BASE_URL está vacía."
+                        exit 1
+                    fi
 
-                    echo "Checking test file exists:"
-                    ls -la "$TEST_FILE"
+                    echo "Ejecutando pruebas contra: $BASE_URL"
 
-                    ${PYTEST_BIN} "$TEST_FILE" --junitxml=reports/pytest-results.xml
+                    test -f "$TEST_FILE"
+
+                    pytest \
+                        "$TEST_FILE" \
+                        --junitxml=reports/pytest-results.xml
                 '''
+            }
 
-                junit allowEmptyResults: false, testResults: 'reports/pytest-results.xml'
-                archiveArtifacts artifacts: 'reports/*', fingerprint: true
+            post {
+                always {
+                    junit(
+                        testResults: 'reports/pytest-results.xml',
+                        allowEmptyResults: false
+                    )
+                }
             }
         }
 
         stage('Promote') {
-            agent { label 'controller' }
-
             steps {
-                echo '=== PROMOTE DEVELOPMENT TO MASTER ==='
-
-                unstash 'source-code'
-
-                withCredentials([usernamePassword(
-                    credentialsId: "${GIT_CREDENTIALS_ID}",
-                    usernameVariable: 'GIT_USERNAME',
-                    passwordVariable: 'GIT_TOKEN'
-                )]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${GIT_CREDENTIALS_ID}",
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_TOKEN'
+                    )
+                ]) {
                     sh '''
+                        set -e
+
+                        echo "=== PROMOTE DEVELOPMENT TO MASTER ==="
                         whoami
                         hostname
                         pwd
 
-                        git config user.email "jenkins@example.com"
                         git config user.name "Jenkins CI"
+                        git config user.email "jenkins@localhost"
 
-                        git remote set-url origin https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git
+                        git remote set-url origin \
+                            "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git"
 
-                        echo "--- Fetching branches ---"
-                        git fetch origin development
-                        git fetch origin master
+                        git fetch origin development master
 
-                        echo "--- Checkout master ---"
-                        git checkout master
-                        git reset --hard origin/master
+                        git checkout -B master origin/master
 
-                        echo "--- Preserve current master Jenkinsfile if it exists ---"
-                        if git cat-file -e HEAD:Jenkinsfile 2>/dev/null; then
-                            git show HEAD:Jenkinsfile > /tmp/master-Jenkinsfile
-                            MASTER_JENKINSFILE_EXISTS="yes"
-                        else
-                            MASTER_JENKINSFILE_EXISTS="no"
-                        fi
+                        git merge \
+                            --no-ff \
+                            origin/development \
+                            -m "Promote development to master from Jenkins CI"
 
-                        echo "--- Merge development into master ---"
-                        git merge --no-ff origin/development -m "Promote development to master from Jenkins CI"
-
-                        if [ "$MASTER_JENKINSFILE_EXISTS" = "yes" ]; then
-                            echo "--- Restore master Jenkinsfile to avoid overwriting future CD pipeline ---"
-                            cp /tmp/master-Jenkinsfile Jenkinsfile
-                            git add Jenkinsfile
-
-                            if ! git diff --cached --quiet; then
-                                git commit -m "Preserve master Jenkinsfile after promotion"
-                            else
-                                echo "Master Jenkinsfile did not change"
-                            fi
-                        fi
-
-                        echo "--- Push master ---"
                         git push origin master
+
+                        echo "--- Último commit de master ---"
+                        git log -1 --oneline
                     '''
                 }
             }
@@ -297,17 +276,15 @@ pipeline {
 
     post {
         success {
-            echo 'CI pipeline completed successfully. Code promoted to master.'
+            echo 'Pipeline CI completado. La rama development se ha mergeado en master.'
         }
 
         failure {
-            echo 'CI pipeline failed. Code was not promoted to master.'
+            echo 'Pipeline CI fallido. No se ha promocionado el código a master.'
         }
 
         always {
-            node('controller') {
-                cleanWs()
-            }
+            cleanWs()
         }
     }
 }
