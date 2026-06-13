@@ -1,5 +1,6 @@
 pipeline {
     agent any
+
     options {
         timestamps()
         skipDefaultCheckout(true)
@@ -11,8 +12,8 @@ pipeline {
         GIT_CREDENTIALS_ID = 'github-pat'
 
         AWS_DEFAULT_REGION = 'us-east-1'
-        STACK_NAME = 'todo-list-aws-staging'
-        SAM_ENVIRONMENT = 'staging'
+        STACK_NAME = 'todo-list-aws-production'
+        SAM_ENVIRONMENT = 'production'
 
         TEST_FILE = 'test/integration/todoApiTest.py'
     }
@@ -25,7 +26,7 @@ pipeline {
 
                 checkout([
                     $class: 'GitSCM',
-                    branches: [[name: '*/development']],
+                    branches: [[name: '*/master']],
                     userRemoteConfigs: [[
                         url: "${REPOSITORY_URL}",
                         credentialsId: "${GIT_CREDENTIALS_ID}"
@@ -40,73 +41,7 @@ pipeline {
 
                     echo "=== ESTADO DEL REPOSITORIO ==="
                     git status
-
-                    echo "=== ARCHIVOS DE LA APLICACIÓN ==="
-                    find src -maxdepth 3 -type f | sort
-
-                    echo "=== ARCHIVOS DE PRUEBAS ==="
-                    find test/integration -maxdepth 2 -type f | sort
                 '''
-            }
-        }
-
-        stage('Static Test') {
-            steps {
-                sh '''
-                    set -e
-
-                    echo "=== VERSIONES DE LAS HERRAMIENTAS ==="
-                    flake8 --version
-                    bandit --version
-
-                    mkdir -p reports
-
-                    echo "=== EJECUTANDO FLAKE8 ==="
-
-                    flake8 \
-                        --exit-zero \
-                        --format=pylint \
-                        src > reports/flake8.out
-
-                    test -f reports/flake8.out
-
-                    echo "=== EJECUTANDO BANDIT ==="
-
-                    set +e
-
-                    bandit \
-                        -r src \
-                        -f custom \
-                        -o reports/bandit.out \
-                        --msg-template "{abspath}:{line}: [{test_id}] {msg}"
-
-                    BANDIT_EXIT=$?
-
-                    set -e
-
-                    test -f reports/bandit.out
-
-                    if [ "$BANDIT_EXIT" -gt 1 ]; then
-                        echo "Bandit ha fallado con código $BANDIT_EXIT"
-                        exit "$BANDIT_EXIT"
-                    fi
-
-                    echo "=== INFORMES GENERADOS ==="
-                    ls -la reports
-                '''
-
-                recordIssues(
-                    tools: [
-                        flake8(
-                            name: 'Flake8',
-                            pattern: 'reports/flake8.out'
-                        ),
-                        pyLint(
-                            name: 'Bandit',
-                            pattern: 'reports/bandit.out'
-                        )
-                    ]
-                )
             }
         }
 
@@ -140,7 +75,7 @@ pipeline {
 
                     trap restore_samconfig EXIT
 
-                    echo "=== DESPLEGANDO EN STAGING ==="
+                    echo "=== DESPLEGANDO EN PRODUCCIÓN ==="
 
                     sam deploy \
                         --template-file .aws-sam/build/template.yaml \
@@ -193,15 +128,16 @@ pipeline {
                     fi
 
                     echo "=================================================="
-                    echo "PRUEBAS REST"
+                    echo "PRUEBAS REST DE PRODUCCIÓN"
                     echo "API utilizada: $BASE_URL"
-                    echo "Archivo de pruebas: $TEST_FILE"
+                    echo "Tests: list_to_do y get_to_do"
                     echo "=================================================="
 
                     pytest \
                         -v \
                         -s \
                         "$TEST_FILE" \
+                        -k "list_to_do or get_to_do" \
                         --junitxml=reports/pytest-results.xml
                 '''
             }
@@ -215,49 +151,15 @@ pipeline {
                 }
             }
         }
-
-        stage('Promote') {
-            steps {
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: "${GIT_CREDENTIALS_ID}",
-                        usernameVariable: 'GIT_USERNAME',
-                        passwordVariable: 'GIT_TOKEN'
-                    )
-                ]) {
-                    sh '''
-                        set -e
-
-                        git config user.name "Jenkins CI"
-                        git config user.email "jenkins@localhost"
-
-                        git remote set-url origin \
-                            "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git"
-
-                        git fetch origin development master
-
-                        git checkout -B master origin/master
-
-                        git merge \
-                            --no-ff \
-                            -X ours \
-                            origin/development \
-                            -m "Promote development to master"
-
-                        git push origin master
-                    '''
-                }
-            }
-        }
     }
 
     post {
         success {
-            echo 'Pipeline completado correctamente.'
+            echo 'Pipeline CD completado correctamente.'
         }
 
         failure {
-            echo 'Pipeline fallido.'
+            echo 'Pipeline CD fallido.'
         }
 
         always {
