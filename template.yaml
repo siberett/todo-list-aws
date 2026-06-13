@@ -96,7 +96,6 @@ Resources:
   TodosDynamoDbTable:
     Type: AWS::DynamoDB::Table
     Properties: 
-      TableName: !Sub "${Stage}-TodosDynamoDbTable"
       AttributeDefinitions: 
         - AttributeName: id
           AttributeType: S

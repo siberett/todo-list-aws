@@ -1,40 +1,34 @@
 pipeline {
-    agent none
+    agent any
 
     options {
         timestamps()
         skipDefaultCheckout(true)
+        disableConcurrentBuilds()
     }
 
     environment {
-        REPO_URL = 'https://github.com/siberett/todo-list-aws.git'
+        REPOSITORY_URL = 'https://github.com/siberett/todo-list-aws.git'
         GIT_CREDENTIALS_ID = 'github-pat'
 
         AWS_DEFAULT_REGION = 'us-east-1'
         STACK_NAME = 'todo-list-aws-staging'
-        STAGE_NAME = 'staging'
+        SAM_ENVIRONMENT = 'staging'
 
         TEST_FILE = 'test/integration/todoApiTest.py'
     }
 
     stages {
+
         stage('Get Code') {
-            agent { label 'controller' }
-
             steps {
-                echo '=== GET CODE ==='
-
-                sh '''
-                    whoami
-                    hostname
-                    pwd
-                '''
+                cleanWs()
 
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: '*/development']],
                     userRemoteConfigs: [[
-                        url: "${REPO_URL}",
+                        url: "${REPOSITORY_URL}",
                         credentialsId: "${GIT_CREDENTIALS_ID}"
                     ]]
                 ])
@@ -45,19 +39,11 @@ pipeline {
                     git log -1 --oneline
                     ls -la
                 '''
-
-                stash name: 'source-code', includes: '**/*'
             }
         }
 
         stage('Static Test') {
-            agent { label 'static-agent' }
-
             steps {
-                echo '=== STATIC TEST: FLAKE8 + BANDIT ==='
-
-                unstash 'source-code'
-
                 sh '''
                     export PATH="$HOME/.local/bin:$PATH"
 
@@ -77,10 +63,11 @@ pipeline {
                     FLAKE8_EXIT=$?
                     set -e
 
-                    if [ ! -f reports/flake8.log ]; then
-                        echo "ERROR: Flake8 report was not generated"
-                        exit 1
-                    fi
+                    bandit \
+                        -r src \
+                        -f custom \
+                        -o reports/bandit.out \
+                        --msg-template "{abspath}:{line}: [{test_id}] {msg}"
 
                     echo "Flake8 exit code: $FLAKE8_EXIT"
                     echo "Flake8 findings do not fail this stage because no quality gate is required."
@@ -89,12 +76,10 @@ pipeline {
                     set +e
                     bandit -r src -f json -o reports/bandit.json
                     BANDIT_EXIT=$?
+
                     set -e
 
-                    if [ ! -f reports/bandit.json ]; then
-                        echo "ERROR: Bandit report was not generated"
-                        exit 1
-                    fi
+                    test -f reports/bandit.out
 
                     echo "Bandit exit code: $BANDIT_EXIT"
                     echo "Bandit findings do not fail this stage because no quality gate is required."
@@ -107,35 +92,29 @@ pipeline {
         }
 
         stage('Deploy') {
-            agent { label 'controller' }
-
             steps {
-                echo '=== DEPLOY TO STAGING WITH AWS SAM ==='
-
-                unstash 'source-code'
-
                 sh '''
-                    whoami
-                    hostname
-                    pwd
+                    set -e
 
-                    echo "Checking AWS identity"
+                    aws --version
+                    sam --version
                     aws sts get-caller-identity
 
-                    echo "Checking SAM version"
-                    sam --version
-
-                    echo "Validating SAM template"
                     sam validate --template-file template.yaml
 
-                    echo "Building SAM application"
                     sam build --template-file template.yaml
 
-                    echo "Deploying SAM application to staging"
+                    restore_samconfig() {
+                        if [ -f samconfig.toml.disabled ]; then
+                            mv samconfig.toml.disabled samconfig.toml
+                        fi
+                    }
 
                     if [ -f samconfig.toml ]; then
-                        mv samconfig.toml samconfig.toml.bak
+                        mv samconfig.toml samconfig.toml.disabled
                     fi
+
+                    trap restore_samconfig EXIT
 
                     sam deploy \
                         --template-file .aws-sam/build/template.yaml \
@@ -145,9 +124,10 @@ pipeline {
                         --resolve-s3 \
                         --no-confirm-changeset \
                         --no-fail-on-empty-changeset \
-                        --parameter-overrides Stage="$STAGE_NAME"
+                        --parameter-overrides Stage="$SAM_ENVIRONMENT"
 
-                    echo "Obtaining API Gateway base URL from CloudFormation outputs"
+                    restore_samconfig
+                    trap - EXIT
 
                     API_URL=$(aws cloudformation describe-stacks \
                         --stack-name "$STACK_NAME" \
@@ -156,29 +136,19 @@ pipeline {
                         --output text)
 
                     if [ -z "$API_URL" ] || [ "$API_URL" = "None" ]; then
-                        echo "ERROR: Could not obtain BaseUrlApi from CloudFormation outputs"
+                        echo "No se ha encontrado BaseUrlApi"
                         exit 1
                     fi
 
-                    echo "API URL obtained:"
-                    echo "$API_URL"
+                    echo "API URL: $API_URL"
 
-                    echo "$API_URL" > api_url.txt
+                    printf '%s' "$API_URL" > api_url.txt
                 '''
-
-                stash name: 'api-url', includes: 'api_url.txt'
             }
         }
 
         stage('Rest Test') {
-            agent { label 'test-agent' }
-
             steps {
-                echo '=== REST TEST WITH PYTEST ==='
-
-                unstash 'source-code'
-                unstash 'api-url'
-
                 sh '''
                     export PATH="$HOME/.local/bin:$PATH"
 
@@ -205,56 +175,32 @@ pipeline {
         }
 
         stage('Promote') {
-            agent { label 'controller' }
-
             steps {
-                echo '=== PROMOTE DEVELOPMENT TO MASTER ==='
-
-                unstash 'source-code'
-
-                withCredentials([usernamePassword(
-                    credentialsId: "${GIT_CREDENTIALS_ID}",
-                    usernameVariable: 'GIT_USERNAME',
-                    passwordVariable: 'GIT_TOKEN'
-                )]) {
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: "${GIT_CREDENTIALS_ID}",
+                        usernameVariable: 'GIT_USERNAME',
+                        passwordVariable: 'GIT_TOKEN'
+                    )
+                ]) {
                     sh '''
-                        whoami
-                        hostname
-                        pwd
+                        set -e
 
-                        git config user.email "jenkins@example.com"
                         git config user.name "Jenkins CI"
+                        git config user.email "jenkins@localhost"
 
-                        git remote set-url origin https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git
+                        git remote set-url origin \
+                            "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git"
 
-                        git fetch origin development
-                        git fetch origin master
+                        git fetch origin development master
 
-                        git checkout master
-                        git reset --hard origin/master
+                        git checkout -B master origin/master
 
-                        echo "Preserving current master Jenkinsfile if it exists"
-                        if git cat-file -e HEAD:Jenkinsfile 2>/dev/null; then
-                            git show HEAD:Jenkinsfile > /tmp/master-Jenkinsfile
-                            MASTER_JENKINSFILE_EXISTS="yes"
-                        else
-                            MASTER_JENKINSFILE_EXISTS="no"
-                        fi
-
-                        echo "Merging development into master"
-                        git merge --no-ff origin/development -m "Promote development to master from Jenkins CI"
-
-                        if [ "$MASTER_JENKINSFILE_EXISTS" = "yes" ]; then
-                            echo "Restoring master Jenkinsfile to avoid overwriting CD pipeline"
-                            cp /tmp/master-Jenkinsfile Jenkinsfile
-                            git add Jenkinsfile
-
-                            if ! git diff --cached --quiet; then
-                                git commit -m "Preserve master Jenkinsfile after promotion"
-                            else
-                                echo "Master Jenkinsfile did not change"
-                            fi
-                        fi
+                        git merge \
+                            --no-ff \
+                            -X ours \
+                            origin/development \
+                            -m "Promote development to master"
 
                         git push origin master
                     '''
@@ -265,11 +211,11 @@ pipeline {
 
     post {
         success {
-            echo 'CI pipeline completed successfully. Code promoted to master.'
+            echo 'Pipeline completado correctamente.'
         }
 
         failure {
-            echo 'CI pipeline failed. Code was not promoted to master.'
+            echo 'Pipeline fallido.'
         }
 
         always {
