@@ -99,7 +99,7 @@ pipeline {
                         --output text)
 
                     if [ -z "$API_URL" ] || [ "$API_URL" = "None" ]; then
-                        echo "No se ha encontrado BaseUrlApi"
+                        echo "ERROR: no se ha encontrado BaseUrlApi"
                         exit 1
                     fi
 
@@ -120,24 +120,31 @@ pipeline {
 
                     mkdir -p reports
 
+                    if [ ! -f api_url.txt ]; then
+                        echo "ERROR: no existe api_url.txt"
+                        exit 1
+                    fi
+
                     export BASE_URL="$(cat api_url.txt)"
 
                     if [ -z "$BASE_URL" ]; then
-                        echo "BASE_URL está vacía"
+                        echo "ERROR: BASE_URL está vacía"
                         exit 1
                     fi
 
                     echo "=================================================="
                     echo "PRUEBAS REST DE PRODUCCIÓN"
                     echo "API utilizada: $BASE_URL"
-                    echo "Tests: list_to_do y get_to_do"
+                    echo "Pruebas seleccionadas:"
+                    echo "- test_api_listtodos"
+                    echo "- test_api_gettodo"
                     echo "=================================================="
 
                     pytest \
                         -v \
                         -s \
                         "$TEST_FILE" \
-                        -k "list_to_do or get_to_do" \
+                        -k "test_api_listtodos or test_api_gettodo" \
                         --junitxml=reports/pytest-results.xml
                 '''
             }
