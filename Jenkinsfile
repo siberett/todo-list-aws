@@ -1,5 +1,5 @@
 pipeline {
-    agent { label 'built-in' }
+    agent any
 
     options {
         timestamps()
