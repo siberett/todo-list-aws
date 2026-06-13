@@ -1,6 +1,5 @@
- pipeline {
+pipeline {
     agent any
-
     options {
         timestamps()
         skipDefaultCheckout(true)
@@ -82,25 +81,47 @@
                         --format=pylint \
                         src > reports/flake8.out
 
-                    test -f reports/flake8.out
+                    if [ ! -f reports/flake8.out ]; then
+                        echo "ERROR: Flake8 no ha generado el informe."
+                        exit 1
+                    fi
 
                     echo "--- Bandit sobre src/ ---"
 
+                    set +e
+
                     bandit \
-                        --exit-zero \
                         -r src \
                         -f custom \
                         -o reports/bandit.out \
                         --msg-template "{abspath}:{line}: [{test_id}] {msg}"
 
-                    test -f reports/bandit.out
+                    BANDIT_EXIT=$?
+
+                    set -e
+
+                    if [ ! -f reports/bandit.out ]; then
+                        echo "ERROR: Bandit no ha generado el informe."
+                        exit 1
+                    fi
+
+                    if [ "$BANDIT_EXIT" -gt 1 ]; then
+                        echo "ERROR: Bandit ha fallado técnicamente con código $BANDIT_EXIT."
+                        exit "$BANDIT_EXIT"
+                    fi
+
+                    echo "Bandit ha finalizado con código $BANDIT_EXIT."
+
+                    if [ "$BANDIT_EXIT" -eq 1 ]; then
+                        echo "Bandit ha encontrado hallazgos."
+                        echo "Los hallazgos no bloquean el pipeline porque no existen Quality Gates."
+                    fi
 
                     echo "--- Informes generados ---"
                     ls -la reports
                 '''
 
                 recordIssues(
-                    enabledForFailure: true,
                     tools: [
                         flake8(
                             name: 'Flake8',
@@ -120,7 +141,7 @@
                 sh '''
                     set -e
 
-                    echo "=== DEPLOY STAGING ==="
+                    echo "=== DEPLOY ==="
                     whoami
                     hostname
                     pwd
@@ -138,22 +159,20 @@
                     echo "--- Construcción SAM ---"
                     sam build --template-file template.yaml
 
-                    echo "--- Despliegue no interactivo en Staging ---"
+                    echo "--- Despliegue en Staging ---"
                     echo "Stack: $STACK_NAME"
-                    echo "Region: $AWS_DEFAULT_REGION"
+                    echo "Región: $AWS_DEFAULT_REGION"
                     echo "Stage: $SAM_ENVIRONMENT"
-
-                    # Se desactiva temporalmente samconfig.toml para evitar
-                    # utilizar buckets antiguos o inexistentes.
-                    if [ -f samconfig.toml ]; then
-                        mv samconfig.toml samconfig.toml.disabled
-                    fi
 
                     restore_samconfig() {
                         if [ -f samconfig.toml.disabled ]; then
                             mv samconfig.toml.disabled samconfig.toml
                         fi
                     }
+
+                    if [ -f samconfig.toml ]; then
+                        mv samconfig.toml samconfig.toml.disabled
+                    fi
 
                     trap restore_samconfig EXIT
 
@@ -179,11 +198,13 @@
                         --output text)
 
                     if [ -z "$API_URL" ] || [ "$API_URL" = "None" ]; then
-                        echo "ERROR: No se encontró el output BaseUrlApi."
+                        echo "ERROR: No se ha encontrado el output BaseUrlApi."
                         exit 1
                     fi
 
-                    echo "API URL: $API_URL"
+                    echo "API URL obtenida:"
+                    echo "$API_URL"
+
                     printf '%s' "$API_URL" > api_url.txt
                 '''
             }
@@ -205,6 +226,11 @@
 
                     mkdir -p reports
 
+                    if [ ! -f api_url.txt ]; then
+                        echo "ERROR: No existe el fichero api_url.txt."
+                        exit 1
+                    fi
+
                     export BASE_URL="$(cat api_url.txt)"
 
                     if [ -z "$BASE_URL" ]; then
@@ -212,9 +238,13 @@
                         exit 1
                     fi
 
-                    echo "Ejecutando pruebas contra: $BASE_URL"
+                    echo "Ejecutando pruebas contra:"
+                    echo "$BASE_URL"
 
-                    test -f "$TEST_FILE"
+                    if [ ! -f "$TEST_FILE" ]; then
+                        echo "ERROR: No existe el fichero de pruebas $TEST_FILE."
+                        exit 1
+                    fi
 
                     pytest \
                         "$TEST_FILE" \
@@ -244,10 +274,12 @@
                     sh '''
                         set -e
 
-                        echo "=== PROMOTE DEVELOPMENT TO MASTER ==="
+                        echo "=== PROMOTE ==="
                         whoami
                         hostname
                         pwd
+
+                        echo "--- Configuración Git ---"
 
                         git config user.name "Jenkins CI"
                         git config user.email "jenkins@localhost"
@@ -255,18 +287,28 @@
                         git remote set-url origin \
                             "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git"
 
-                        git fetch origin development master
+                        echo "--- Actualización de ramas remotas ---"
+
+                        git fetch origin development
+                        git fetch origin master
+
+                        echo "--- Checkout de master ---"
 
                         git checkout -B master origin/master
+
+                        echo "--- Merge development en master ---"
 
                         git merge \
                             --no-ff \
                             origin/development \
                             -m "Promote development to master from Jenkins CI"
 
+                        echo "--- Push de master ---"
+
                         git push origin master
 
                         echo "--- Último commit de master ---"
+
                         git log -1 --oneline
                     '''
                 }
@@ -276,11 +318,11 @@
 
     post {
         success {
-            echo 'Pipeline CI completado. La rama development se ha mergeado en master.'
+            echo 'Pipeline CI completado correctamente. Development se ha mergeado en master.'
         }
 
         failure {
-            echo 'Pipeline CI fallido. No se ha promocionado el código a master.'
+            echo 'Pipeline CI fallido. El código no se ha promocionado a master.'
         }
 
         always {
