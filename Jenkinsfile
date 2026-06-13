@@ -1,5 +1,6 @@
 pipeline {
-    agent any
+    agent { label 'built-in' }
+
     options {
         timestamps()
         skipDefaultCheckout(true)
@@ -23,16 +24,6 @@ pipeline {
             steps {
                 cleanWs()
 
-                sh '''
-                    set -e
-
-                    echo "=== GET CODE ==="
-                    whoami
-                    hostname
-                    pwd
-                    git --version
-                '''
-
                 checkout([
                     $class: 'GitSCM',
                     branches: [[name: '*/development']],
@@ -45,14 +36,10 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "--- Revision descargada ---"
                     git log -1 --oneline
                     git status
 
-                    echo "--- Código fuente ---"
                     find src -maxdepth 3 -type f | sort
-
-                    echo "--- Pruebas de integración ---"
                     find test/integration -maxdepth 2 -type f | sort
                 '''
             }
@@ -63,30 +50,17 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "=== STATIC TEST ==="
-                    whoami
-                    hostname
-                    pwd
-
-                    echo "--- Versiones ---"
                     flake8 --version
                     bandit --version
 
                     mkdir -p reports
-
-                    echo "--- Flake8 sobre src/ ---"
 
                     flake8 \
                         --exit-zero \
                         --format=pylint \
                         src > reports/flake8.out
 
-                    if [ ! -f reports/flake8.out ]; then
-                        echo "ERROR: Flake8 no ha generado el informe."
-                        exit 1
-                    fi
-
-                    echo "--- Bandit sobre src/ ---"
+                    test -f reports/flake8.out
 
                     set +e
 
@@ -100,24 +74,13 @@ pipeline {
 
                     set -e
 
-                    if [ ! -f reports/bandit.out ]; then
-                        echo "ERROR: Bandit no ha generado el informe."
-                        exit 1
-                    fi
+                    test -f reports/bandit.out
 
                     if [ "$BANDIT_EXIT" -gt 1 ]; then
-                        echo "ERROR: Bandit ha fallado técnicamente con código $BANDIT_EXIT."
+                        echo "Bandit ha fallado con código $BANDIT_EXIT"
                         exit "$BANDIT_EXIT"
                     fi
 
-                    echo "Bandit ha finalizado con código $BANDIT_EXIT."
-
-                    if [ "$BANDIT_EXIT" -eq 1 ]; then
-                        echo "Bandit ha encontrado hallazgos."
-                        echo "Los hallazgos no bloquean el pipeline porque no existen Quality Gates."
-                    fi
-
-                    echo "--- Informes generados ---"
                     ls -la reports
                 '''
 
@@ -141,28 +104,13 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "=== DEPLOY ==="
-                    whoami
-                    hostname
-                    pwd
-
-                    echo "--- Versiones ---"
                     aws --version
                     sam --version
-
-                    echo "--- Identidad AWS ---"
                     aws sts get-caller-identity
 
-                    echo "--- Validación SAM ---"
                     sam validate --template-file template.yaml
 
-                    echo "--- Construcción SAM ---"
                     sam build --template-file template.yaml
-
-                    echo "--- Despliegue en Staging ---"
-                    echo "Stack: $STACK_NAME"
-                    echo "Región: $AWS_DEFAULT_REGION"
-                    echo "Stage: $SAM_ENVIRONMENT"
 
                     restore_samconfig() {
                         if [ -f samconfig.toml.disabled ]; then
@@ -189,8 +137,6 @@ pipeline {
                     restore_samconfig
                     trap - EXIT
 
-                    echo "--- Obtención de la URL de API Gateway ---"
-
                     API_URL=$(aws cloudformation describe-stacks \
                         --stack-name "$STACK_NAME" \
                         --region "$AWS_DEFAULT_REGION" \
@@ -198,12 +144,11 @@ pipeline {
                         --output text)
 
                     if [ -z "$API_URL" ] || [ "$API_URL" = "None" ]; then
-                        echo "ERROR: No se ha encontrado el output BaseUrlApi."
+                        echo "No se ha encontrado BaseUrlApi"
                         exit 1
                     fi
 
-                    echo "API URL obtenida:"
-                    echo "$API_URL"
+                    echo "API URL: $API_URL"
 
                     printf '%s' "$API_URL" > api_url.txt
                 '''
@@ -215,34 +160,14 @@ pipeline {
                 sh '''
                     set -e
 
-                    echo "=== REST TEST ==="
-                    whoami
-                    hostname
-                    pwd
-
-                    echo "--- Versiones ---"
                     pytest --version
-                    curl --version
 
                     mkdir -p reports
-
-                    if [ ! -f api_url.txt ]; then
-                        echo "ERROR: No existe el fichero api_url.txt."
-                        exit 1
-                    fi
 
                     export BASE_URL="$(cat api_url.txt)"
 
                     if [ -z "$BASE_URL" ]; then
-                        echo "ERROR: BASE_URL está vacía."
-                        exit 1
-                    fi
-
-                    echo "Ejecutando pruebas contra:"
-                    echo "$BASE_URL"
-
-                    if [ ! -f "$TEST_FILE" ]; then
-                        echo "ERROR: No existe el fichero de pruebas $TEST_FILE."
+                        echo "BASE_URL está vacía"
                         exit 1
                     fi
 
@@ -274,42 +199,23 @@ pipeline {
                     sh '''
                         set -e
 
-                        echo "=== PROMOTE ==="
-                        whoami
-                        hostname
-                        pwd
-
-                        echo "--- Configuración Git ---"
-
                         git config user.name "Jenkins CI"
                         git config user.email "jenkins@localhost"
 
                         git remote set-url origin \
                             "https://${GIT_USERNAME}:${GIT_TOKEN}@github.com/siberett/todo-list-aws.git"
 
-                        echo "--- Actualización de ramas remotas ---"
-
-                        git fetch origin development
-                        git fetch origin master
-
-                        echo "--- Checkout de master ---"
+                        git fetch origin development master
 
                         git checkout -B master origin/master
 
-                        echo "--- Merge development en master ---"
-
                         git merge \
                             --no-ff \
+                            -X ours \
                             origin/development \
-                            -m "Promote development to master from Jenkins CI"
-
-                        echo "--- Push de master ---"
+                            -m "Promote development to master"
 
                         git push origin master
-
-                        echo "--- Último commit de master ---"
-
-                        git log -1 --oneline
                     '''
                 }
             }
@@ -318,11 +224,11 @@ pipeline {
 
     post {
         success {
-            echo 'Pipeline CI completado correctamente. Development se ha mergeado en master.'
+            echo 'Pipeline completado correctamente.'
         }
 
         failure {
-            echo 'Pipeline CI fallido. El código no se ha promocionado a master.'
+            echo 'Pipeline fallido.'
         }
 
         always {
