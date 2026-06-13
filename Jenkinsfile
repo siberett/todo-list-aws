@@ -90,7 +90,7 @@ pipeline {
                     restore_samconfig
                     trap - EXIT
 
-                    echo "=== OBTENIENDO URL DE LA API ==="
+                    echo "=== OBTENIENDO URL DE PRODUCCIÓN ==="
 
                     API_URL=$(aws cloudformation describe-stacks \
                         --stack-name "$STACK_NAME" \
@@ -103,7 +103,7 @@ pipeline {
                         exit 1
                     fi
 
-                    echo "API URL: $API_URL"
+                    echo "API URL de producción: $API_URL"
 
                     printf '%s' "$API_URL" > api_url.txt
                 '''
