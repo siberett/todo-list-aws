@@ -95,14 +95,15 @@ Resources:
             
   TodosDynamoDbTable:
     Type: AWS::DynamoDB::Table
-    Properties: 
-      AttributeDefinitions: 
+    Properties:
+      TableName: !Sub "todos-${Stage}"
+      AttributeDefinitions:
         - AttributeName: id
           AttributeType: S
-      KeySchema: 
+      KeySchema:
         - AttributeName: id
           KeyType: HASH
-      ProvisionedThroughput: 
+      ProvisionedThroughput:
         ReadCapacityUnits: 1
         WriteCapacityUnits: 1
 
